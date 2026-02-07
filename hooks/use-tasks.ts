@@ -41,12 +41,14 @@ export function useTasks() {
       tasks
         .filter((t) => t.date === dateKey)
         .sort((a, b) => {
-          if (a.time && b.time) return a.time.localeCompare(b.time) || a.order - b.order
-          if (a.time && !b.time) return -1
-          if (!a.time && b.time) return 1
+          // Scheduled tasks first, sorted by startHour
+          if (a.startHour !== null && b.startHour !== null)
+            return a.startHour - b.startHour || a.order - b.order
+          if (a.startHour !== null && b.startHour === null) return -1
+          if (a.startHour === null && b.startHour !== null) return 1
           return a.order - b.order
         }),
-    [tasks]
+    [tasks],
   )
 
   const getDatesWithTasks = useCallback(() => {
@@ -67,24 +69,32 @@ export function useTasks() {
       }
       setTasks((prev) => [...prev, newTask])
     },
-    [tasks]
+    [tasks],
   )
 
-  const updateTask = useCallback((id: string, updates: Partial<Omit<Task, "id">>) => {
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updates } : t)))
-  }, [])
+  const updateTask = useCallback(
+    (id: string, updates: Partial<Omit<Task, "id">>) => {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...updates } : t)),
+      )
+    },
+    [],
+  )
 
   const deleteTask = useCallback((id: string) => {
     setTasks((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  const reorderTasks = useCallback((dateKey: string, reordered: Task[]) => {
-    setTasks((prev) => {
-      const others = prev.filter((t) => t.date !== dateKey)
-      const updated = reordered.map((t, i) => ({ ...t, order: i }))
-      return [...others, ...updated]
-    })
-  }, [])
+  const reorderTasks = useCallback(
+    (dateKey: string, reordered: Task[]) => {
+      setTasks((prev) => {
+        const others = prev.filter((t) => t.date !== dateKey)
+        const updated = reordered.map((t, i) => ({ ...t, order: i }))
+        return [...others, ...updated]
+      })
+    },
+    [],
+  )
 
   return {
     tasks,

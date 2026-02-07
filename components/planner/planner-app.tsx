@@ -184,7 +184,6 @@ export function PlannerApp() {
             onUpdate={updateTask}
             onDelete={deleteTask}
             onAdd={addTask}
-            onReorder={reorderTasks}
           />
         </main>
       </div>

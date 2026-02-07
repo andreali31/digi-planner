@@ -1,12 +1,18 @@
 "use client"
 
-import React from "react"
-
-import { useCallback, useRef, useState } from "react"
+import React, { useCallback, useRef, useState } from "react"
 import { CalendarDays } from "lucide-react"
 import type { Task } from "@/lib/planner-types"
-import { HOURS, formatHour, formatDateKey } from "@/lib/planner-types"
-import { TaskCard } from "./task-card"
+import {
+  HOURS,
+  HOUR_HEIGHT,
+  FIRST_HOUR,
+  LAST_HOUR,
+  formatHour,
+  formatDateKey,
+  clampHour,
+} from "@/lib/planner-types"
+import { TimelineBlock } from "./timeline-block"
 import { AddTaskDialog } from "./add-task-dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -17,7 +23,14 @@ interface DayPanelProps {
   onUpdate: (id: string, updates: Partial<Omit<Task, "id">>) => void
   onDelete: (id: string) => void
   onAdd: (task: Omit<Task, "id" | "order">) => void
-  onReorder: (dateKey: string, reordered: Task[]) => void
+}
+
+type DragState = {
+  taskId: string
+  type: "move" | "resize"
+  startY: number
+  originalHour: number
+  originalDuration: number
 }
 
 export function DayPanel({
@@ -26,12 +39,15 @@ export function DayPanel({
   onUpdate,
   onDelete,
   onAdd,
-  onReorder,
 }: DayPanelProps) {
   const dateKey = formatDateKey(selectedDate)
-  const dragItem = useRef<number | null>(null)
-  const dragOverItem = useRef<number | null>(null)
-  const [dragging, setDragging] = useState(false)
+  const timelineRef = useRef<HTMLDivElement>(null)
+  const dragState = useRef<DragState | null>(null)
+  const [ghostHour, setGhostHour] = useState<number | null>(null)
+  const [ghostDuration, setGhostDuration] = useState<number | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragType, setDragType] = useState<"move" | "resize" | null>(null)
+  const [clickedHour, setClickedHour] = useState<number | null>(null)
 
   const dayLabel = selectedDate.toLocaleDateString("en-US", {
     weekday: "long",
@@ -42,136 +58,286 @@ export function DayPanel({
   const today = new Date()
   const isToday = formatDateKey(today) === dateKey
 
-  // Group tasks: timed tasks go into their hour slots, untimed go into a separate list
-  const timedTasks = tasks.filter((t) => t.time !== null)
-  const untimedTasks = tasks.filter((t) => t.time === null)
+  const scheduledTasks = tasks.filter((t) => t.startHour !== null)
+  const unscheduledTasks = tasks.filter((t) => t.startHour === null)
 
-  // Group timed tasks by hour
-  const tasksByHour: Record<number, Task[]> = {}
-  for (const t of timedTasks) {
-    const hour = parseInt(t.time!.split(":")[0])
-    if (!tasksByHour[hour]) tasksByHour[hour] = []
-    tasksByHour[hour].push(t)
-  }
+  const totalHeight = HOURS.length * HOUR_HEIGHT
 
-  const handleDragStart = useCallback((index: number) => {
-    dragItem.current = index
-    setDragging(true)
-  }, [])
+  // --- Current time indicator ---
+  const now = new Date()
+  const currentHour = now.getHours()
+  const currentMinutes = now.getMinutes()
+  const showNowLine =
+    isToday && currentHour >= FIRST_HOUR && currentHour <= LAST_HOUR
+  const nowOffset =
+    (currentHour - FIRST_HOUR) * HOUR_HEIGHT +
+    (currentMinutes / 60) * HOUR_HEIGHT
 
-  const handleDragEnter = useCallback((index: number) => {
-    dragOverItem.current = index
-  }, [])
+  // --- Drag handlers ---
+  const handlePointerDown = useCallback(
+    (
+      e: React.PointerEvent,
+      task: Task,
+      type: "move" | "resize",
+    ) => {
+      e.preventDefault()
+      e.stopPropagation()
+      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
 
-  const handleDragEnd = useCallback(() => {
-    if (dragItem.current === null || dragOverItem.current === null) {
-      setDragging(false)
-      return
+      dragState.current = {
+        taskId: task.id,
+        type,
+        startY: e.clientY,
+        originalHour: task.startHour ?? FIRST_HOUR,
+        originalDuration: task.duration,
+      }
+      setDraggingId(task.id)
+      setDragType(type)
+      setGhostHour(task.startHour ?? FIRST_HOUR)
+      setGhostDuration(task.duration)
+    },
+    [],
+  )
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    const ds = dragState.current
+    if (!ds) return
+
+    const deltaY = e.clientY - ds.startY
+    const deltaHours = Math.round(deltaY / HOUR_HEIGHT)
+
+    if (ds.type === "move") {
+      const newHour = clampHour(ds.originalHour + deltaHours, ds.originalDuration)
+      setGhostHour(newHour)
+      setGhostDuration(ds.originalDuration)
+    } else {
+      const newDuration = Math.max(1, Math.min(ds.originalDuration + deltaHours, LAST_HOUR - ds.originalHour + 1))
+      setGhostHour(ds.originalHour)
+      setGhostDuration(newDuration)
     }
-    const reordered = [...tasks]
-    const [dragged] = reordered.splice(dragItem.current, 1)
-    reordered.splice(dragOverItem.current, 0, dragged)
-    onReorder(dateKey, reordered)
-    dragItem.current = null
-    dragOverItem.current = null
-    setDragging(false)
-  }, [tasks, dateKey, onReorder])
+  }, [])
+
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const ds = dragState.current
+      if (!ds) return
+
+      ;(e.target as HTMLElement).releasePointerCapture(e.pointerId)
+
+      if (ds.type === "move" && ghostHour !== null) {
+        onUpdate(ds.taskId, { startHour: ghostHour })
+      } else if (ds.type === "resize" && ghostDuration !== null) {
+        onUpdate(ds.taskId, { duration: ghostDuration })
+      }
+
+      dragState.current = null
+      setDraggingId(null)
+      setDragType(null)
+      setGhostHour(null)
+      setGhostDuration(null)
+    },
+    [ghostHour, ghostDuration, onUpdate],
+  )
+
+  // --- Drop unscheduled task onto timeline ---
+  const handleUnscheduledDragStart = useCallback(
+    (e: React.PointerEvent, task: Task) => {
+      e.preventDefault()
+      e.stopPropagation()
+      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+
+      const rect = timelineRef.current?.getBoundingClientRect()
+      const scrollTop = timelineRef.current?.closest("[data-radix-scroll-area-viewport]")?.scrollTop ?? 0
+
+      dragState.current = {
+        taskId: task.id,
+        type: "move",
+        startY: e.clientY,
+        originalHour: FIRST_HOUR,
+        originalDuration: task.duration,
+      }
+      setDraggingId(task.id)
+      setDragType("move")
+      setGhostHour(FIRST_HOUR)
+      setGhostDuration(task.duration)
+    },
+    [],
+  )
+
+  const handleUnscheduledPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const ds = dragState.current
+      if (!ds) return
+
+      const rect = timelineRef.current?.getBoundingClientRect()
+      if (!rect) return
+
+      const viewport = timelineRef.current?.closest("[data-radix-scroll-area-viewport]")
+      const scrollTop = viewport?.scrollTop ?? 0
+
+      const relativeY = e.clientY - rect.top + scrollTop
+      const hour = Math.round(relativeY / HOUR_HEIGHT) + FIRST_HOUR
+      const clamped = clampHour(hour, ds.originalDuration)
+      setGhostHour(clamped)
+      setGhostDuration(ds.originalDuration)
+    },
+    [],
+  )
+
+  const handleUnscheduledPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const ds = dragState.current
+      if (!ds) return
+
+      ;(e.target as HTMLElement).releasePointerCapture(e.pointerId)
+
+      if (ghostHour !== null) {
+        onUpdate(ds.taskId, { startHour: ghostHour })
+      }
+
+      dragState.current = null
+      setDraggingId(null)
+      setDragType(null)
+      setGhostHour(null)
+      setGhostDuration(null)
+    },
+    [ghostHour, onUpdate],
+  )
+
+  // --- Click empty slot to add ---
+  function handleSlotClick(hour: number) {
+    if (dragState.current) return
+    setClickedHour(hour)
+  }
 
   return (
     <div className="flex h-full flex-col">
       {/* Day header */}
-      <div className="flex items-center justify-between border-b px-4 py-3 md:px-6">
+      <div className="flex items-center justify-between border-b bg-card px-4 py-3 md:px-6">
         <div>
           <h2 className="text-lg font-semibold text-foreground">{dayLabel}</h2>
           {isToday && (
             <span className="text-xs font-medium text-primary">Today</span>
           )}
         </div>
-        <AddTaskDialog dateKey={dateKey} onAdd={onAdd} />
+        <AddTaskDialog
+          dateKey={dateKey}
+          onAdd={onAdd}
+          defaultHour={clickedHour}
+          onOpenChange={(open) => {
+            if (!open) setClickedHour(null)
+          }}
+        />
       </div>
 
       <ScrollArea className="flex-1">
         <div className="px-4 py-4 md:px-6">
-          {/* Untimed tasks section */}
-          {untimedTasks.length > 0 && (
-            <div className="mb-6">
+          {/* Unscheduled tasks tray */}
+          {unscheduledTasks.length > 0 && (
+            <div className="mb-4">
               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                All Day
+                Unscheduled &mdash; drag onto timeline
               </h3>
-              <div className="flex flex-col gap-2">
-                {untimedTasks.map((task, idx) => {
-                  const globalIdx = tasks.indexOf(task)
-                  return (
-                    <div
-                      key={task.id}
-                      draggable
-                      onDragStart={() => handleDragStart(globalIdx)}
-                      onDragEnter={() => handleDragEnter(globalIdx)}
-                      onDragEnd={handleDragEnd}
-                      onDragOver={(e) => e.preventDefault()}
-                      className={cn(
-                        "transition-transform",
-                        dragging && "cursor-grabbing"
-                      )}
-                    >
-                      <TaskCard
-                        task={task}
-                        onUpdate={onUpdate}
-                        onDelete={onDelete}
-                        dragHandleProps={{
-                          onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
-                        }}
-                      />
-                    </div>
-                  )
-                })}
+              <div className="flex flex-wrap gap-2">
+                {unscheduledTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    className={cn(
+                      "cursor-grab select-none rounded-lg border bg-card px-3 py-2 text-sm font-medium text-card-foreground shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing",
+                      draggingId === task.id && "opacity-50",
+                    )}
+                    onPointerDown={(e) => handleUnscheduledDragStart(e, task)}
+                    onPointerMove={handleUnscheduledPointerMove}
+                    onPointerUp={handleUnscheduledPointerUp}
+                    style={{ touchAction: "none" }}
+                  >
+                    {task.title}
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
-          {/* Timeline */}
-          <div className="relative">
-            {HOURS.map((hour) => {
-              const hourTasks = tasksByHour[hour] || []
-              const paddedHour = String(hour).padStart(2, "0")
+          {/* Timeline grid */}
+          <div
+            ref={timelineRef}
+            className="relative"
+            style={{ height: totalHeight }}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+          >
+            {/* Hour rows / slots */}
+            {HOURS.map((hour) => (
+              <div
+                key={hour}
+                className="absolute left-0 right-0 flex border-t border-border/40"
+                style={{
+                  top: (hour - FIRST_HOUR) * HOUR_HEIGHT,
+                  height: HOUR_HEIGHT,
+                }}
+              >
+                <div className="w-14 shrink-0 pt-1 pr-2 text-right text-[11px] text-muted-foreground">
+                  {formatHour(hour)}
+                </div>
+                <button
+                  type="button"
+                  className="flex-1 transition-colors hover:bg-accent/40"
+                  onClick={() => handleSlotClick(hour)}
+                  aria-label={`Add task at ${formatHour(hour)}`}
+                >
+                  <span className="sr-only">
+                    {"Click to add task at "}{formatHour(hour)}
+                  </span>
+                </button>
+              </div>
+            ))}
+
+            {/* Ghost preview while dragging */}
+            {draggingId && ghostHour !== null && ghostDuration !== null && (
+              <div
+                className="pointer-events-none absolute left-14 right-0 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5"
+                style={{
+                  top: (ghostHour - FIRST_HOUR) * HOUR_HEIGHT + 2,
+                  height: ghostDuration * HOUR_HEIGHT - 4,
+                }}
+              />
+            )}
+
+            {/* Now line */}
+            {showNowLine && (
+              <div
+                className="pointer-events-none absolute left-14 right-0 z-30 flex items-center"
+                style={{ top: nowOffset }}
+              >
+                <div className="h-2.5 w-2.5 -translate-x-1/2 rounded-full bg-destructive" />
+                <div className="h-0.5 flex-1 bg-destructive" />
+              </div>
+            )}
+
+            {/* Task blocks */}
+            {scheduledTasks.map((task) => {
+              const isDragging = draggingId === task.id
+              const displayHour =
+                isDragging && ghostHour !== null ? ghostHour : task.startHour!
+              const displayDuration =
+                isDragging && dragType === "resize" && ghostDuration !== null
+                  ? ghostDuration
+                  : task.duration
 
               return (
-                <div
-                  key={hour}
-                  className="group/hour relative flex min-h-[4rem] border-t border-border/50"
-                >
-                  <div className="w-16 shrink-0 py-2 pr-3 text-right text-xs text-muted-foreground">
-                    {formatHour(hour)}
-                  </div>
-                  <div className="flex flex-1 flex-col gap-1.5 py-1.5">
-                    {hourTasks.map((task) => {
-                      const globalIdx = tasks.indexOf(task)
-                      return (
-                        <div
-                          key={task.id}
-                          draggable
-                          onDragStart={() => handleDragStart(globalIdx)}
-                          onDragEnter={() => handleDragEnter(globalIdx)}
-                          onDragEnd={handleDragEnd}
-                          onDragOver={(e) => e.preventDefault()}
-                          className={cn(
-                            "transition-transform",
-                            dragging && "cursor-grabbing"
-                          )}
-                        >
-                          <TaskCard
-                            task={task}
-                            onUpdate={onUpdate}
-                            onDelete={onDelete}
-                            dragHandleProps={{
-                              onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
-                            }}
-                          />
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
+                <TimelineBlock
+                  key={task.id}
+                  task={task}
+                  top={(displayHour - FIRST_HOUR) * HOUR_HEIGHT + 2}
+                  height={displayDuration * HOUR_HEIGHT - 4}
+                  isDragging={isDragging}
+                  onPointerDownMove={(e) => handlePointerDown(e, task, "move")}
+                  onPointerDownResize={(e) =>
+                    handlePointerDown(e, task, "resize")
+                  }
+                  onUpdate={onUpdate}
+                  onDelete={onDelete}
+                />
               )
             })}
           </div>
@@ -179,9 +345,11 @@ export function DayPanel({
           {tasks.length === 0 && (
             <div className="flex flex-col items-center justify-center py-20 text-center">
               <CalendarDays className="mb-3 h-10 w-10 text-muted-foreground/40" />
-              <p className="text-sm font-medium text-muted-foreground">No tasks for this day</p>
+              <p className="text-sm font-medium text-muted-foreground">
+                No tasks for this day
+              </p>
               <p className="mt-1 text-xs text-muted-foreground/70">
-                Click &quot;Add Task&quot; to get started
+                Click a time slot or &quot;Add Task&quot; to get started
               </p>
             </div>
           )}
