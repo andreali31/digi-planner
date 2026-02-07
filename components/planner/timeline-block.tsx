@@ -7,7 +7,6 @@ import {
   Trash2,
   Check,
   X,
-  GripHorizontal,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -153,7 +152,7 @@ export function TimelineBlock({
     >
       {/* Drag handle / move area */}
       <div
-        className="flex min-h-0 flex-1 cursor-grab items-start gap-1.5 px-2 pt-1.5 active:cursor-grabbing"
+        className="flex min-h-0 flex-1 cursor-grab items-start gap-1.5 px-2 pt-1.5 pb-5 active:cursor-grabbing"
         onPointerDown={onPointerDownMove}
         style={{ touchAction: "none" }}
       >
@@ -279,11 +278,11 @@ export function TimelineBlock({
 
       {/* Resize handle at the bottom */}
       <div
-        className="flex h-3 cursor-ns-resize items-center justify-center opacity-0 transition-opacity group-hover/block:opacity-100"
+        className="absolute bottom-0 left-0 right-0 flex h-4 cursor-ns-resize items-center justify-center rounded-b-lg transition-colors hover:bg-foreground/5"
         onPointerDown={onPointerDownResize}
         style={{ touchAction: "none" }}
       >
-        <GripHorizontal className="h-3 w-3 text-muted-foreground/50" />
+        <div className="h-[3px] w-8 rounded-full bg-muted-foreground/30 transition-colors group-hover/block:bg-muted-foreground/60" />
       </div>
     </div>
   )

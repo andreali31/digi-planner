@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useCallback, useRef, useState } from "react"
+import React, { useCallback, useEffect, useRef, useState } from "react"
 import { CalendarDays } from "lucide-react"
 import type { Task } from "@/lib/planner-types"
 import {
@@ -42,7 +42,7 @@ export function DayPanel({
 }: DayPanelProps) {
   const dateKey = formatDateKey(selectedDate)
   const timelineRef = useRef<HTMLDivElement>(null)
-  const dragState = useRef<DragState | null>(null)
+  const dragRef = useRef<DragState | null>(null)
   const [ghostHour, setGhostHour] = useState<number | null>(null)
   const [ghostDuration, setGhostDuration] = useState<number | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -73,18 +73,81 @@ export function DayPanel({
     (currentHour - FIRST_HOUR) * HOUR_HEIGHT +
     (currentMinutes / 60) * HOUR_HEIGHT
 
-  // --- Drag handlers ---
-  const handlePointerDown = useCallback(
-    (
-      e: React.PointerEvent,
-      task: Task,
-      type: "move" | "resize",
-    ) => {
+  // --- Stable refs for callbacks used in window listeners ---
+  const onUpdateRef = useRef(onUpdate)
+  onUpdateRef.current = onUpdate
+  const ghostHourRef = useRef(ghostHour)
+  ghostHourRef.current = ghostHour
+  const ghostDurationRef = useRef(ghostDuration)
+  ghostDurationRef.current = ghostDuration
+
+  // --- Window-level pointermove / pointerup for reliable dragging ---
+  useEffect(() => {
+    if (!draggingId) return
+
+    function onPointerMove(e: PointerEvent) {
+      const ds = dragRef.current
+      if (!ds) return
+      e.preventDefault()
+
+      const deltaY = e.clientY - ds.startY
+      const deltaHours = Math.round(deltaY / HOUR_HEIGHT)
+
+      if (ds.type === "move") {
+        const newHour = clampHour(
+          ds.originalHour + deltaHours,
+          ds.originalDuration,
+        )
+        setGhostHour(newHour)
+        setGhostDuration(ds.originalDuration)
+      } else {
+        // resize
+        const newDuration = Math.max(
+          1,
+          Math.min(
+            ds.originalDuration + deltaHours,
+            LAST_HOUR - ds.originalHour + 1,
+          ),
+        )
+        setGhostHour(ds.originalHour)
+        setGhostDuration(newDuration)
+      }
+    }
+
+    function onPointerUp() {
+      const ds = dragRef.current
+      if (!ds) return
+
+      if (ds.type === "move" && ghostHourRef.current !== null) {
+        onUpdateRef.current(ds.taskId, { startHour: ghostHourRef.current })
+      } else if (ds.type === "resize" && ghostDurationRef.current !== null) {
+        onUpdateRef.current(ds.taskId, {
+          duration: ghostDurationRef.current,
+        })
+      }
+
+      dragRef.current = null
+      setDraggingId(null)
+      setDragType(null)
+      setGhostHour(null)
+      setGhostDuration(null)
+    }
+
+    window.addEventListener("pointermove", onPointerMove)
+    window.addEventListener("pointerup", onPointerUp)
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove)
+      window.removeEventListener("pointerup", onPointerUp)
+    }
+  }, [draggingId])
+
+  // --- Start drag (move or resize) ---
+  const startDrag = useCallback(
+    (e: React.PointerEvent, task: Task, type: "move" | "resize") => {
       e.preventDefault()
       e.stopPropagation()
-      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
 
-      dragState.current = {
+      dragRef.current = {
         taskId: task.id,
         type,
         startY: e.clientY,
@@ -99,57 +162,13 @@ export function DayPanel({
     [],
   )
 
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    const ds = dragState.current
-    if (!ds) return
-
-    const deltaY = e.clientY - ds.startY
-    const deltaHours = Math.round(deltaY / HOUR_HEIGHT)
-
-    if (ds.type === "move") {
-      const newHour = clampHour(ds.originalHour + deltaHours, ds.originalDuration)
-      setGhostHour(newHour)
-      setGhostDuration(ds.originalDuration)
-    } else {
-      const newDuration = Math.max(1, Math.min(ds.originalDuration + deltaHours, LAST_HOUR - ds.originalHour + 1))
-      setGhostHour(ds.originalHour)
-      setGhostDuration(newDuration)
-    }
-  }, [])
-
-  const handlePointerUp = useCallback(
-    (e: React.PointerEvent) => {
-      const ds = dragState.current
-      if (!ds) return
-
-      ;(e.target as HTMLElement).releasePointerCapture(e.pointerId)
-
-      if (ds.type === "move" && ghostHour !== null) {
-        onUpdate(ds.taskId, { startHour: ghostHour })
-      } else if (ds.type === "resize" && ghostDuration !== null) {
-        onUpdate(ds.taskId, { duration: ghostDuration })
-      }
-
-      dragState.current = null
-      setDraggingId(null)
-      setDragType(null)
-      setGhostHour(null)
-      setGhostDuration(null)
-    },
-    [ghostHour, ghostDuration, onUpdate],
-  )
-
-  // --- Drop unscheduled task onto timeline ---
-  const handleUnscheduledDragStart = useCallback(
+  // --- Unscheduled: start drag onto timeline ---
+  const startUnscheduledDrag = useCallback(
     (e: React.PointerEvent, task: Task) => {
       e.preventDefault()
       e.stopPropagation()
-      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
 
-      const rect = timelineRef.current?.getBoundingClientRect()
-      const scrollTop = timelineRef.current?.closest("[data-radix-scroll-area-viewport]")?.scrollTop ?? 0
-
-      dragState.current = {
+      dragRef.current = {
         taskId: task.id,
         type: "move",
         startY: e.clientY,
@@ -164,49 +183,9 @@ export function DayPanel({
     [],
   )
 
-  const handleUnscheduledPointerMove = useCallback(
-    (e: React.PointerEvent) => {
-      const ds = dragState.current
-      if (!ds) return
-
-      const rect = timelineRef.current?.getBoundingClientRect()
-      if (!rect) return
-
-      const viewport = timelineRef.current?.closest("[data-radix-scroll-area-viewport]")
-      const scrollTop = viewport?.scrollTop ?? 0
-
-      const relativeY = e.clientY - rect.top + scrollTop
-      const hour = Math.round(relativeY / HOUR_HEIGHT) + FIRST_HOUR
-      const clamped = clampHour(hour, ds.originalDuration)
-      setGhostHour(clamped)
-      setGhostDuration(ds.originalDuration)
-    },
-    [],
-  )
-
-  const handleUnscheduledPointerUp = useCallback(
-    (e: React.PointerEvent) => {
-      const ds = dragState.current
-      if (!ds) return
-
-      ;(e.target as HTMLElement).releasePointerCapture(e.pointerId)
-
-      if (ghostHour !== null) {
-        onUpdate(ds.taskId, { startHour: ghostHour })
-      }
-
-      dragState.current = null
-      setDraggingId(null)
-      setDragType(null)
-      setGhostHour(null)
-      setGhostDuration(null)
-    },
-    [ghostHour, onUpdate],
-  )
-
   // --- Click empty slot to add ---
   function handleSlotClick(hour: number) {
-    if (dragState.current) return
+    if (dragRef.current) return
     setClickedHour(hour)
   }
 
@@ -246,9 +225,7 @@ export function DayPanel({
                       "cursor-grab select-none rounded-lg border bg-card px-3 py-2 text-sm font-medium text-card-foreground shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing",
                       draggingId === task.id && "opacity-50",
                     )}
-                    onPointerDown={(e) => handleUnscheduledDragStart(e, task)}
-                    onPointerMove={handleUnscheduledPointerMove}
-                    onPointerUp={handleUnscheduledPointerUp}
+                    onPointerDown={(e) => startUnscheduledDrag(e, task)}
                     style={{ touchAction: "none" }}
                   >
                     {task.title}
@@ -261,10 +238,8 @@ export function DayPanel({
           {/* Timeline grid */}
           <div
             ref={timelineRef}
-            className="relative"
+            className="relative select-none"
             style={{ height: totalHeight }}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
           >
             {/* Hour rows / slots */}
             {HOURS.map((hour) => (
@@ -286,7 +261,8 @@ export function DayPanel({
                   aria-label={`Add task at ${formatHour(hour)}`}
                 >
                   <span className="sr-only">
-                    {"Click to add task at "}{formatHour(hour)}
+                    {"Click to add task at "}
+                    {formatHour(hour)}
                   </span>
                 </button>
               </div>
@@ -295,10 +271,11 @@ export function DayPanel({
             {/* Ghost preview while dragging */}
             {draggingId && ghostHour !== null && ghostDuration !== null && (
               <div
-                className="pointer-events-none absolute left-14 right-0 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5"
+                className="pointer-events-none absolute left-14 right-1 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5"
                 style={{
                   top: (ghostHour - FIRST_HOUR) * HOUR_HEIGHT + 2,
                   height: ghostDuration * HOUR_HEIGHT - 4,
+                  zIndex: 25,
                 }}
               />
             )}
@@ -322,7 +299,9 @@ export function DayPanel({
               const displayDuration =
                 isDragging && dragType === "resize" && ghostDuration !== null
                   ? ghostDuration
-                  : task.duration
+                  : isDragging && dragType === "move" && ghostDuration !== null
+                    ? ghostDuration
+                    : task.duration
 
               return (
                 <TimelineBlock
@@ -331,10 +310,8 @@ export function DayPanel({
                   top={(displayHour - FIRST_HOUR) * HOUR_HEIGHT + 2}
                   height={displayDuration * HOUR_HEIGHT - 4}
                   isDragging={isDragging}
-                  onPointerDownMove={(e) => handlePointerDown(e, task, "move")}
-                  onPointerDownResize={(e) =>
-                    handlePointerDown(e, task, "resize")
-                  }
+                  onPointerDownMove={(e) => startDrag(e, task, "move")}
+                  onPointerDownResize={(e) => startDrag(e, task, "resize")}
                   onUpdate={onUpdate}
                   onDelete={onDelete}
                 />
